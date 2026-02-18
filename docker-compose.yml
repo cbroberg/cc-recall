@@ -1,0 +1,17 @@
+services:
+  cc-recall:
+    build: .
+    ports:
+      - "3100:3100"
+    volumes:
+      # Mount Claude Code sessions (read-only — we never write to the originals)
+      - ~/.claude/projects:/data/sessions:ro
+      # Persist cc-recall database
+      - ~/.cc-recall:/data/db
+    environment:
+      - SESSIONS_PATH=/data/sessions
+      - DB_PATH=/data/db/recall.db
+      - EMBEDDING_MODEL=Xenova/all-MiniLM-L6-v2
+      - WATCH_MODE=true
+      - LOG_LEVEL=info
+    restart: unless-stopped

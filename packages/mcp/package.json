@@ -1,0 +1,24 @@
+{
+  "name": "@cc-recall/mcp",
+  "version": "0.1.0",
+  "description": "MCP server for cc-recall — Claude Code session memory",
+  "type": "module",
+  "main": "dist/index.js",
+  "bin": {
+    "@cc-recall/mcp": "dist/index.js"
+  },
+  "scripts": {
+    "build": "tsup",
+    "dev": "tsup --watch",
+    "clean": "rm -rf dist"
+  },
+  "dependencies": {
+    "@cc-recall/core": "workspace:*",
+    "@modelcontextprotocol/sdk": "^1.6.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "tsup": "^8.3.0",
+    "typescript": "^5.7.0"
+  }
+}

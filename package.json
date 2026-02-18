@@ -1,0 +1,16 @@
+{
+  "name": "cc-recall",
+  "private": true,
+  "version": "0.0.0",
+  "description": "RAG-powered MCP server for Claude Code session memory",
+  "scripts": {
+    "build": "pnpm -r build",
+    "dev": "pnpm -r --parallel dev",
+    "clean": "pnpm -r clean",
+    "index": "pnpm --filter @cc-recall/core run index"
+  },
+  "packageManager": "pnpm@9.0.0",
+  "engines": {
+    "node": ">=20.0.0"
+  }
+}
