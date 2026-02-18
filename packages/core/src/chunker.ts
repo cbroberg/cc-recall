@@ -1,6 +1,11 @@
 import { randomUUID } from 'node:crypto';
-import type { ParsedSession, IndexedEntry, SessionChunk, ChunkType, ToolCallEntry } from './types.js';
-import { extractText, extractToolNames, extractFilePaths } from './parser.js';
+import type { ParsedSession, IndexedEntry, SessionChunk, ChunkType } from './types.js';
+import {
+  extractText,
+  extractToolNames,
+  extractFilePaths,
+  extractToolResults,
+} from './parser.js';
 import { redactSecrets } from './redact.js';
 
 const DECISION_KEYWORDS = [
@@ -18,14 +23,8 @@ const ARCHITECTURE_TERMS = [
 
 const CODE_CHANGE_TOOLS = new Set(['Write', 'Edit', 'MultiEdit', 'NotebookEdit']);
 
-// ~200–800 tokens
 const MIN_CHUNK_CHARS = 200;
 const MAX_CHUNK_CHARS = 3200;
-const AVG_CHARS_PER_TOKEN = 4;
-
-function estimateTokens(text: string): number {
-  return Math.ceil(text.length / AVG_CHARS_PER_TOKEN);
-}
 
 function isDecision(text: string): boolean {
   const lower = text.toLowerCase();
@@ -39,39 +38,31 @@ function isArchitecture(text: string): boolean {
   return termCount >= 2;
 }
 
-function getTextFromEntry(entry: IndexedEntry): string {
-  return extractText(entry.message?.content as Parameters<typeof extractText>[0]);
+function getAssistantText(entry: IndexedEntry): string {
+  return extractText(entry.message?.content ?? null);
 }
 
-function getToolResultText(entry: IndexedEntry): string {
-  const result = entry.result;
-  if (!result) return '';
-  if (typeof result === 'string') return result;
-  if (typeof result === 'object') {
-    const r = result as Record<string, unknown>;
-    if (typeof r.content === 'string') return r.content;
-    return JSON.stringify(result).slice(0, 500);
-  }
-  return '';
+function getUserText(entry: IndexedEntry): string {
+  return extractText(entry.message?.content ?? null);
 }
 
 function detectChunkType(entries: IndexedEntry[]): ChunkType {
   const assistantEntries = entries.filter((e) => e.type === 'assistant');
+  const userEntries = entries.filter((e) => e.type === 'user');
+
+  // Tool names from assistant content blocks (type: "tool_use")
   const toolNames = assistantEntries.flatMap((e) => extractToolNames(e));
   const toolSet = new Set(toolNames);
 
-  const resultTexts = entries
-    .filter((e) => e.type === 'tool_result')
-    .map(getToolResultText)
-    .join('\n');
-
+  // Tool results from user content blocks (type: "tool_result")
+  const resultTexts = userEntries.map((e) => extractToolResults(e)).join('\n');
   const hasError = /error|exception|failed|cannot|could not|not found/i.test(resultTexts);
   const hasCodeChange = [...toolSet].some((t) => CODE_CHANGE_TOOLS.has(t));
 
   if (hasError && hasCodeChange) return 'error-fix';
   if (hasCodeChange) return 'code-change';
 
-  const assistantText = assistantEntries.map(getTextFromEntry).join('\n');
+  const assistantText = assistantEntries.map(getAssistantText).join('\n');
   if (isDecision(assistantText)) return 'decision';
   if (isArchitecture(assistantText)) return 'architecture';
 
@@ -81,18 +72,18 @@ function detectChunkType(entries: IndexedEntry[]): ChunkType {
 function buildChunkContent(entries: IndexedEntry[]): string {
   const parts: string[] = [];
   for (const entry of entries) {
-    if (entry.type === 'human') {
-      const text = getTextFromEntry(entry);
+    if (entry.type === 'user') {
+      const text = getUserText(entry);
+      const toolResults = extractToolResults(entry);
       if (text) parts.push(`[User]\n${text}`);
-    } else if (entry.type === 'assistant') {
-      const text = getTextFromEntry(entry);
-      if (text) parts.push(`[Assistant]\n${text}`);
-    } else if (entry.type === 'tool_result') {
-      const text = getToolResultText(entry);
-      if (text) {
-        const truncated = text.length > 1000 ? `${text.slice(0, 1000)}...` : text;
+      if (toolResults) {
+        const truncated =
+          toolResults.length > 1000 ? `${toolResults.slice(0, 1000)}...` : toolResults;
         parts.push(`[Tool Result]\n${truncated}`);
       }
+    } else if (entry.type === 'assistant') {
+      const text = getAssistantText(entry);
+      if (text) parts.push(`[Assistant]\n${text}`);
     }
   }
   return parts.join('\n\n');
@@ -101,13 +92,13 @@ function buildChunkContent(entries: IndexedEntry[]): string {
 function buildSummary(entries: IndexedEntry[], type: ChunkType): string {
   const assistantText = entries
     .filter((e) => e.type === 'assistant')
-    .map(getTextFromEntry)
+    .map(getAssistantText)
     .join(' ')
     .slice(0, 200);
 
   const userText = entries
-    .filter((e) => e.type === 'human')
-    .map(getTextFromEntry)
+    .filter((e) => e.type === 'user')
+    .map(getUserText)
     .join(' ')
     .slice(0, 100);
 
@@ -179,9 +170,8 @@ function createChunk(entries: IndexedEntry[], session: ParsedSession): SessionCh
 
 /**
  * Split a session into semantic chunks.
- *
- * Groups entries into interaction windows (human → assistant + tool_results),
- * merges windows that are too small, and splits windows that are too large.
+ * Groups entries into windows starting at each user message,
+ * merging small windows and splitting large ones.
  */
 export function chunkSession(session: ParsedSession): SessionChunk[] {
   const { entries } = session;
@@ -189,12 +179,12 @@ export function chunkSession(session: ParsedSession): SessionChunk[] {
 
   const chunks: SessionChunk[] = [];
 
-  // Group entries into interaction windows: each new human message starts a window
+  // Group into windows: each new user message starts a window
   const windows: IndexedEntry[][] = [];
   let current: IndexedEntry[] = [];
 
   for (const entry of entries) {
-    if (entry.type === 'human' && current.length > 0) {
+    if (entry.type === 'user' && current.length > 0) {
       windows.push(current);
       current = [];
     }
@@ -208,7 +198,6 @@ export function chunkSession(session: ParsedSession): SessionChunk[] {
   for (const window of windows) {
     const windowContent = buildChunkContent(window);
 
-    // If this window alone exceeds max, emit it as its own chunk immediately
     if (windowContent.length > MAX_CHUNK_CHARS) {
       if (buffer.length > 0) {
         chunks.push(createChunk(buffer, session));
@@ -226,7 +215,6 @@ export function chunkSession(session: ParsedSession): SessionChunk[] {
         chunks.push(createChunk(buffer, session));
         buffer = [];
       } else {
-        // Buffer too large — emit everything before this window, keep this window
         const prev = buffer.slice(0, buffer.length - window.length);
         if (prev.length > 0) chunks.push(createChunk(prev, session));
         buffer = [...window];
@@ -234,7 +222,6 @@ export function chunkSession(session: ParsedSession): SessionChunk[] {
     }
   }
 
-  // Flush remaining buffer
   if (buffer.length > 0) {
     chunks.push(createChunk(buffer, session));
   }

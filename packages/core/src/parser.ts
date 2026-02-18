@@ -1,25 +1,19 @@
 import { createReadStream } from 'node:fs';
 import { createInterface } from 'node:readline';
 import { basename, dirname } from 'node:path';
-import type { RawEntry, IndexedEntry, ParsedSession, ContentBlock, ToolCallEntry } from './types.js';
+import type { RawEntry, IndexedEntry, ParsedSession, ContentBlock } from './types.js';
 
 /**
- * Extract plain text from message content (string or content block array).
+ * Extract plain text from message content.
+ * Only returns text from `type: "text"` blocks — skips tool_use and tool_result blocks.
  */
 export function extractText(content: string | ContentBlock[] | undefined | null): string {
   if (!content) return '';
   if (typeof content === 'string') return content;
   if (Array.isArray(content)) {
     return content
-      .map((block) => {
-        if (typeof block === 'string') return block as string;
-        if (block && typeof block === 'object') {
-          const b = block as unknown as Record<string, unknown>;
-          if (b.type === 'text' && typeof b.text === 'string') return b.text;
-          if (typeof b.content === 'string') return b.content;
-        }
-        return '';
-      })
+      .filter((b) => typeof b === 'object' && b !== null && b.type === 'text')
+      .map((b) => (b as ContentBlock).text ?? '')
       .filter(Boolean)
       .join('\n');
   }
@@ -27,35 +21,59 @@ export function extractText(content: string | ContentBlock[] | undefined | null)
 }
 
 /**
- * Extract tool names from an assistant entry's tool_calls.
+ * Extract tool names from an assistant entry's content blocks (type: "tool_use").
  */
 export function extractToolNames(entry: RawEntry): string[] {
-  const calls = entry.message?.tool_calls;
-  if (!calls || !Array.isArray(calls)) return [];
-  return (calls as ToolCallEntry[])
-    .map((tc) => tc.name ?? tc.function?.name ?? '')
+  const content = entry.message?.content;
+  if (!content || !Array.isArray(content)) return [];
+  return (content as ContentBlock[])
+    .filter((b) => b.type === 'tool_use' && b.name)
+    .map((b) => b.name!)
     .filter(Boolean);
 }
 
 /**
- * Extract file paths referenced in tool call inputs.
+ * Extract file paths from tool_use input fields in an assistant entry.
  */
 export function extractFilePaths(entry: RawEntry): string[] {
-  const calls = entry.message?.tool_calls;
-  if (!calls || !Array.isArray(calls)) return [];
+  const content = entry.message?.content;
+  if (!content || !Array.isArray(content)) return [];
   const paths: string[] = [];
-  for (const tc of calls as ToolCallEntry[]) {
-    const input = tc.input;
-    if (!input) continue;
-    if (typeof input.file_path === 'string') paths.push(input.file_path);
-    if (typeof input.path === 'string') paths.push(input.path);
+  for (const block of content as ContentBlock[]) {
+    if (block.type === 'tool_use' && block.input) {
+      const input = block.input;
+      if (typeof input.file_path === 'string') paths.push(input.file_path);
+      if (typeof input.path === 'string') paths.push(input.path);
+    }
   }
   return paths;
 }
 
 /**
+ * Extract tool result text from a user entry's content blocks (type: "tool_result").
+ */
+export function extractToolResults(entry: RawEntry): string {
+  const content = entry.message?.content;
+  if (!content || !Array.isArray(content)) return '';
+  return (content as ContentBlock[])
+    .filter((b) => b.type === 'tool_result')
+    .map((b) => {
+      if (typeof b.content === 'string') return b.content;
+      if (Array.isArray(b.content)) {
+        return (b.content as ContentBlock[])
+          .filter((c) => c.type === 'text')
+          .map((c) => c.text ?? '')
+          .join('\n');
+      }
+      return '';
+    })
+    .filter(Boolean)
+    .join('\n');
+}
+
+/**
  * Parse a Claude Code JSONL session file.
- * Gracefully skips malformed lines and sidechain entries.
+ * Gracefully skips malformed lines, sidechain entries, and metadata entries.
  */
 export async function parseSessionFile(filePath: string): Promise<ParsedSession> {
   const sessionId = basename(filePath, '.jsonl');
@@ -79,13 +97,22 @@ export async function parseSessionFile(filePath: string): Promise<ParsedSession>
     }
     try {
       const entry = JSON.parse(trimmed) as RawEntry;
-      // Skip sidechain entries (internal tool orchestration, not user-facing)
+
+      // Skip sidechain entries and non-conversation entries
       if (entry.isSidechain) {
         index++;
         continue;
       }
+
+      // Only keep user and assistant messages
+      if (entry.type !== 'user' && entry.type !== 'assistant') {
+        index++;
+        continue;
+      }
+
       const indexed: IndexedEntry = { ...entry, index };
       entries.push(indexed);
+
       if (entry.timestamp) {
         if (!firstTimestamp) firstTimestamp = entry.timestamp;
         lastTimestamp = entry.timestamp;
@@ -96,9 +123,7 @@ export async function parseSessionFile(filePath: string): Promise<ParsedSession>
     index++;
   }
 
-  const messageCount = entries.filter(
-    (e) => e.type === 'human' || e.type === 'assistant',
-  ).length;
+  const messageCount = entries.length;
 
   return {
     sessionId,

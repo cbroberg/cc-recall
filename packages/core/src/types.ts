@@ -79,35 +79,29 @@ export interface IndexOptions {
 // --- Internal parser types ---
 
 export interface RawEntry {
-  type: 'human' | 'assistant' | 'tool_result' | string;
+  type: 'user' | 'assistant' | string;
   message?: {
     role?: string;
     content?: string | ContentBlock[];
-    tool_calls?: ToolCallEntry[];
   };
-  tool_call_id?: string;
-  result?: unknown;
   timestamp?: string;
   uuid?: string;
+  parentUuid?: string;
   isSidechain?: boolean;
+  sessionId?: string;
 }
 
 export interface ContentBlock {
-  type: string;
+  type: 'text' | 'tool_use' | 'tool_result' | string;
+  // text blocks
   text?: string;
-  tool_use_id?: string;
-  content?: string | ContentBlock[];
-}
-
-export interface ToolCallEntry {
+  // tool_use blocks (assistant)
   id?: string;
-  type?: string;
   name?: string;
   input?: Record<string, unknown>;
-  function?: {
-    name: string;
-    arguments: string;
-  };
+  // tool_result blocks (user)
+  tool_use_id?: string;
+  content?: string | ContentBlock[];
 }
 
 export interface IndexedEntry extends RawEntry {

@@ -261,11 +261,11 @@ export class RecallStore {
       FROM chunks_vec v
       JOIN chunks c ON c.id = v.chunk_id
       JOIN sessions s ON s.id = c.session_id
-      WHERE v.embedding MATCH ?
+      WHERE v.embedding MATCH ? AND k = ?
       ORDER BY v.distance
     `;
 
-    const params: unknown[] = [new Uint8Array(queryVector.buffer)];
+    const params: unknown[] = [new Uint8Array(queryVector.buffer), limit];
 
     if (options.chunkType) {
       sql += ' AND c.type = ?';
@@ -278,7 +278,7 @@ export class RecallStore {
     }
 
     sql += ' LIMIT ?';
-    params.push(limit);
+    params.push(limit); // belt-and-suspenders after k= filter
 
     const rows = this.db.prepare(sql).all(...(params as Parameters<Database.Statement['all']>)) as RawSearchRow[];
 
@@ -303,7 +303,7 @@ export class RecallStore {
         },
         createdAt: new Date(row.created_at * 1000),
       },
-      score: 1 - row.distance,
+      score: 1 - row.distance / 2, // cosine distance [0,2] → similarity [0,1]
       session: {
         sessionId: row.session_id,
         projectPath: row.project_path,
