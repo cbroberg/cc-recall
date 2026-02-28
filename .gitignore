@@ -82,6 +82,9 @@ out
 .nuxt
 dist
 
+# Package build output (covers packages/*/dist/)
+packages/*/dist/
+
 # Gatsby files
 .cache/
 # Comment in the public line in if your project uses Gatsby and not Next.js
